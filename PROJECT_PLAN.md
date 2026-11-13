@@ -1,208 +1,192 @@
-# Thesis Project Plan
+# Project and Design Plan — Phase 1
 
-**Working title:** Predictive Multi-Person Tracking with Adaptive Identity Association under Occlusion  
-**Version:** 0.1 — 29 October 2026  
-**Current status:** GitHub repository created. Implementation and experiments have not yet been verified.
+**Project:** Pedestrian Trajectory Prediction  
+**Working thesis title:** Context-Aware Pedestrian Trajectory Prediction from Video  
+**Version:** 0.3 · 13 November 2026  
+**Status:** Initial design; implementation and experiments pending.
 
-This is a working implementation and research plan. Model sizes, training settings, and the exact adaptive association rule will be selected through experiments.
+## 1. Objective
 
-## 1. Objective and research question
+Build and train a custom model that predicts several complete future pedestrian trajectories using movement history, body pose, scene geometry, and nearby people's observed movement. Integrate it into a video pipeline and compare its behavior with simple baselines and an established forecasting model.
 
-Build a system that processes a single-camera video, detects people, maintains their identities across frames, estimates future movement, and attempts to recover the correct identity after temporary occlusion.
+The central research question is:
 
-Research question: Does combining learned trajectory prediction with association that adapts to motion uncertainty, appearance reliability, and time missing improve identity continuity compared with established trackers?
+> How much do pose, scene geometry, and neighboring pedestrians improve direct prediction of complete future paths over motion history alone, and what accuracy and runtime trade-offs does our design achieve relative to an established predictor?
 
-Success means a reproducible system and a careful evaluation of this question. Improvements and novelty are hypotheses to test, not assumed outcomes.
+The intended contribution is our forecasting architecture, training implementation, controlled experiments, and analysis. Existing models already use motion, context, multiple futures, and pose. A claim of novelty must identify a specific difference through related-work review and evidence.
 
-## 2. What the finished system should do
+## 2. Agreed direction and open decisions
 
-- Accept a recorded video or ordered image sequence.
-- Detect people and assign track IDs.
-- Display bounding boxes, IDs, observed movement trails, and predicted future positions.
-- Keep track histories and manage new, active, temporarily lost, and removed tracks.
-- Attempt identity recovery after a person reappears, while allowing uncertain matches to be rejected.
-- Export tracking results, runtime measurements, configurations, and comparison summaries.
-- Provide examples of successful recoveries and remaining failures.
+| Agreed direction | Meaning |
+| --- | --- |
+| Direct complete-path prediction | Output K complete future position sequences with ranking scores. Endpoints are the last positions in those sequences. |
+| Custom forecasting model | Implement and train our own design using standard neural-network building blocks. |
+| Four planned input sources | Target motion, target pose, scene geometry, and nearby people's observed motion. All four belong to the intended full model. |
+| Existing perception components | Reuse detection, pose estimation, and tracking implementations to obtain observations. |
+| Independent comparison | Use constant velocity, a motion-only learned baseline, and an established predictor; Y-Net is the proposed learned reference. |
+| Phase 1 is design and feasibility | Establish a data contract and a defensible first architecture before full implementation and training. |
 
-Initial scope is single-camera, two-dimensional tracking. Multi-camera identity matching, facial recognition, 3D reconstruction, and action recognition are outside this initial plan. A live-camera interface is an optional extension.
+Still to decide: dataset, camera viewpoint, coordinate convention, observation duration, prediction horizon, sampling interval, K, missing-data policy, encoder sizes, fusion mechanism, decoder details, and training objective. GPU, memory, and available development time must also be recorded.
 
-## 3. Tracking comes before the learned predictor
+The initial preference is to output every future time step in one forward pass. The direct-path decision does not require a particular layer type; an autoregressive decoder would also predict paths directly, but is not the starting candidate.
 
-Detection provides boxes for one frame. Tracking connects detections across time, maintains identities, and produces movement histories.
+## 3. Scope and ownership
 
-The first tracker will already use a simple motion model. A Kalman filter provides short-term position estimates; the later GRU is a learned alternative or extension to this motion component, not the mechanism that creates tracking identities.
+The finished application should process recorded video, show detections and track IDs, draw observed motion, display K predicted paths, and later reveal the actual future without changing the saved forecast. It should export predictions, configurations, metrics, and representative failures.
 
-At each frame, the eventual system will:
+Tracking supplies identity-consistent histories. Developing a new identity-association or re-identification algorithm is outside this project's scope. Other exclusions are robot control, multi-camera identity matching, full 3D reconstruction, and future-video generation. Live-camera support can follow a working recorded-video demonstration.
 
-1. Detect people in the current image.
-2. Predict where existing tracks should be at the current time, using their earlier histories.
-3. Compare detections with predicted tracks using motion and, where available, appearance.
-4. Assign compatible matches; allow tracks and detections to remain unmatched.
-5. Update matched tracks, create new tracks, and maintain or retire lost tracks.
-6. Save the updated histories and optionally forecast further into the future for display.
+| Component | Reuse, build, or adapt |
+| --- | --- |
+| Person detector | Start from pretrained YOLO weights. Plan a bounded fine-tuning comparison once suitable training boxes and a validation split exist. |
+| Pose estimator | Integrate a pretrained model with keypoint confidence. A pose model may provide both boxes and keypoints, avoiding a redundant detector pass. |
+| Tracker | Reuse an existing implementation; ByteTrack is an initial candidate. |
+| Scene representation | Use available aligned maps or derive a documented walkability/obstacle representation. |
+| Forecasting network | Build our own encoders, fusion, decoder, losses, training loop, and checkpoints. Forecasting weights will be trained on the selected training split. |
+| Reference predictor | Integrate Y-Net as a separate model, checking its preprocessing and training-data provenance. |
+| Data and application | Build preprocessing, coordinate transforms, caches, evaluation, visualization, and reproducibility records. |
 
-Steps 1 and 2 are conceptually independent inputs to association. Tracking, prediction, and association form a recurring loop.
+Detector fine-tuning is a supporting experiment, not a prerequisite for designing the predictor. Pose fine-tuning would require keypoint labels; box annotations alone do not supervise a skeleton model.
 
-## 4. Components and planned contributions
+## 4. Forecasting contract
 
-| Component | Starting point | Planned work |
+For one target pedestrian at prediction time t, use only information available at or before t.
+
+| Field | Proposed meaning |
+| --- | --- |
+| Target history | T_obs positions, timestamps, validity masks, and optionally derived velocities. |
+| Pose history | J body keypoints per observed time step, with confidence and visibility masks. |
+| Scene context | An aligned scene image or walkability/obstacle map, with the crop and coordinate transform recorded. |
+| Neighbor histories | Up to N nearby people's observed positions or velocities, relative to the target, with masks. |
+| Training target | T_pred annotated future positions of the same pedestrian. These are labels, never model inputs. |
+| Prediction | K trajectories, each with T_pred future 2D positions, plus K ranking scores. |
+
+The batched output shapes are `trajectories: [B, K, T_pred, 2]` and `scores: [B, K]`, where B is batch size. K and both sequence lengths are configuration values still to be selected.
+
+Positions, neighbors, and scene geometry must share a documented coordinate frame. Choose a position convention such as a box reference point or calibrated ground-plane location based on the dataset. Normalized image coordinates are not metres. If the camera moves, ego-motion compensation and map alignment become explicit requirements.
+
+Represent target motion relative to its last observed position where useful; preserve the inverse transform. Normalize body pose in a separate body-centered frame so image scale does not dominate joint features. Transform movement and maps consistently when augmenting data.
+
+Never feed future neighbors, future poses, true test endpoints, or histories smoothed using later frames into the predictor. Dataset annotation interpolation must be audited for this issue.
+
+## 5. Candidate architecture
+
+These components define a first design to evaluate, not a requirement to implement several competing architectures.
+
+| Module | Starting candidate | Design question to resolve |
 | --- | --- | --- |
-| Detector | Pretrained YOLO; small model for initial development | Integrate inference; run a pedestrian fine-tuning study; compare frozen-layer and broader fine-tuning strategies where useful |
-| Tracking | ByteTrack, then BoT-SORT | Build the video pipeline, histories, exports, configuration, evaluation, and tracker integration; study matching and track lifecycle |
-| Motion prediction | Existing tracker motion model; constant-velocity reference | Implement and train a GRU on annotated trajectories; compare forecasting and downstream tracking performance |
-| Appearance/ReID | Pretrained person appearance model when needed | Integrate embeddings and appearance history; fine-tune only if evidence supports the additional work |
-| Adaptive association | Fixed matching rule as a reference | Design adaptive cue weighting, gating, and rejection using uncertainty and occlusion duration; optionally compare a learned match scorer |
-| Evaluation and application | TrackEval and a simple video runner | Reproducible experiments, overlays, saved outputs, measured runtime, failure analysis, and a demonstrable final system |
+| Motion encoder | Small GRU over positions/displacements and valid time steps. | Which motion features and history duration carry enough information? |
+| Pose encoder | Per-frame joint-feature network followed by a small temporal encoder. | How should confidence, missing joints, and body orientation affect the representation? |
+| Scene encoder | Compact CNN producing a spatial feature map. | What crop, map channels, and spatial resolution capture usable geometry? |
+| Interaction encoder | Shared temporal encoding of neighbors, followed by target-conditioned attention. | Which neighbors are included, and how are absent neighbors masked? |
+| Fusion | Target-conditioned learned fusion of motion, pose, interaction, and spatial scene features. | Can the decoder retain access to where obstacles are located? |
+| Direct decoder | K candidate embeddings with a shared decoder, or K output heads, each producing the complete future sequence. | Which implementation learns distinct, useful alternatives without excessive cost? |
+| Ranking head | One logit per candidate, optionally normalized with softmax. | Does the preferred candidate predict well, and are scores meaningful? |
 
-Using an established tracker initially means implementing the surrounding system and integrating its algorithm. It does not mean claiming the tracker itself as original work. We will modify or extend a clearly separated tracking/association module when testing our method.
+Start the motion-and-decoder design with a small GRU and direct coordinate/displacement outputs. Keep spatial scene features available to fusion or the decoder instead of prematurely compressing the entire map into one vector. Attention is one candidate mechanism, not a commitment to a large transformer.
 
-Fine-tuning and training a standard GRU are substantial implementation and experimental work. The candidate original contribution is the specific adaptive association method and its demonstrated effects. Motion-plus-appearance matching already exists; related work must establish what our method changes.
+The output can represent offsets from the last observed location or future step displacements accumulated into positions. Phase 1 must choose one and define the conversion used by training, evaluation, and visualization.
 
-## 5. Ordered milestones
+Implementing a motion-only version first will help validate this contract. It is an experimental baseline and development step; pose, scene, and interactions remain part of the planned full model.
 
-### M0 — Record the scope and prepare the workspace
+### Training multiple futures
 
-Tasks:
-- Add this plan to the repository, for example as docs/PROJECT_PLAN.md.
-- Add a short README describing the objective and current status.
-- Confirm operating system, Python environment, GPU, and available memory.
-- Create a dedicated environment and verify PyTorch GPU access if available.
-- Record package versions; ignore datasets, weights, and generated outputs in Git.
+Usually each example contains one realized future, even when several futures were possible. Applying the same regression target independently to every candidate can make all outputs converge to similar paths.
 
-Done when: the repository contains the plan and the selected environment can import the required packages.
+One starting objective to investigate is:
 
-### M1 — Person detection on a sequence
+1. Compute a full-trajectory error for each candidate against the observed future.
+2. Regress the best-matching candidate toward that future.
+3. Train the ranking head to favor that candidate.
+4. Inspect candidate usage, diversity, and plausibility before adding regularization or changing the objective.
 
-Tasks:
-- Load one short development video or annotated image sequence.
-- Run pretrained YOLO for the person class.
-- Preserve frame ordering, timestamps or FPS, image size, boxes, and confidence scores.
-- Save an annotated detection video.
+This is a candidate winner-takes-all objective with a ranking loss, not a guarantee of diverse predictions. Unused candidates and mode collapse must be checked. Do not reward arbitrary separation that pushes paths into obstacles. Any scene or smoothness penalty must have a separate ablation.
 
-Done when: one repeatable command produces a video with person detections.
+Ranking scores are not automatically calibrated probabilities. Alternative paths cannot all be declared correct or incorrect from one recorded future. The final objective and its justification remain a Phase 1 decision.
 
-### M2 — Working tracking baseline
+## 6. Dataset selection
 
-Tasks:
-- Integrate ByteTrack explicitly.
-- Display IDs and store a movement history for each track.
-- Save observed trails, annotated video, and MOT-compatible tracking results.
-- Ensure tracker state persists within a sequence and resets between sequences.
-- Inspect crossings, missed detections, disappearances, and reappearances.
-- Add BoT-SORT as a comparison; record whether ReID is enabled.
+Choose data that supports the intended model, not just a visually appealing walking video. Audit a small sample before committing to a complete download or preprocessing effort.
 
-Done when: the system maintains IDs across a complete sequence, saves its results, and documents concrete successes and failures.
+Required checks:
 
-### M3 — Evaluation and related-work foundation
+- Video frames, reliable timing, pedestrian identities, and annotated positions covering observations and futures.
+- People large and visible enough for useful pose features, or aligned pose annotations.
+- Scene/map information that can be aligned with the trajectories.
+- Simultaneous neighbor observations and meaningful pedestrian interactions.
+- Clear handling of occlusion, missing labels, identity changes, and camera movement.
+- Enough independent sequences/scenes for training, validation, and testing.
+- Practical access, storage, permitted use, and compatibility with the reference model.
 
-Tasks:
-- Evaluate annotated development/validation sequences with TrackEval.
-- Record HOTA, IDF1, ID switches, and processing speed.
-- Distinguish missing detections from incorrect identity association.
-- Define training, validation, and final evaluation partitions before training.
-- Read ByteTrack, BoT-SORT, and relevant prediction/occlusion association work; keep notes linking methods to our hypothesis.
+[Stanford Drone Dataset](https://cvgl.stanford.edu/projects/uav_data/) is worth auditing for video, trajectories, and Y-Net compatibility. Its aerial viewpoint makes pose usability a specific question to test. [JRDB-Pose](https://jrdb.erc.monash.edu.au/dataset/pose) is another candidate for pose-rich observations, but its mobile-camera setting adds alignment and ego-motion work. Neither is selected yet.
 
-Done when: we have a baseline results table, a reproducible evaluation command, a fixed data split, and a specific improvement hypothesis.
+If a candidate cannot support a cue, record the evidence and reconsider the dataset or document a deliberate scope decision. Do not silently remove pose or social context from the full model.
 
-### M4 — Detector fine-tuning study
+## 7. Evaluation design
 
-Tasks:
-- Prepare pedestrian detection labels from training data, respecting annotation and ignore-region rules.
-- Train from pretrained weights; compare a frozen-backbone strategy with broader fine-tuning if resources allow.
-- Select checkpoints and settings using validation data.
-- Evaluate detection quality and downstream tracking using the same tracker settings.
-- Keep the original detector and record a negative result if fine-tuning does not improve generalization.
+Separate two questions:
 
-Done when: a documented comparison shows the effect of detector adaptation.
+1. **Forecasting quality:** compare predictors on the same eligible annotated histories and future labels, with the provenance of pose/map features recorded.
+2. **Pipeline quality:** repeat with detector/tracker histories, keeping future annotations for scoring and reporting tracking coverage and missing forecasts.
 
-### M5 — Trajectory prediction
+| Comparison | Purpose |
+| --- | --- |
+| Constant velocity | Establish a simple extrapolation reference. |
+| Custom motion-only predictor | Establish the learned baseline with the same trajectory output format. |
+| Full custom model minus pose, minus scene, and minus neighbors | Isolate the contribution of each input source. |
+| Full custom model vs Y-Net | Compare with an established forecasting approach. |
+| Original vs fine-tuned detector, once available | Measure perception adaptation and its downstream effect separately. |
 
-Tasks:
-- Extract identity-consistent movement sequences from ground-truth training annotations.
-- Define the position representation, temporal sampling, history duration, and prediction horizon.
-- Start with image-plane coordinates on stationary-camera footage. Normalized image coordinates are not real-world metres.
-- Use constant-velocity and Kalman-based references.
-- Implement and train a GRU; compare prediction errors on held-out sequences.
-- Integrate predictions into tracking and evaluate with noisy, incomplete observed histories.
+For Y-Net, document both the input information available to each model and a matched-information comparison where practical. Improvements from extra pose or neighbor information must not be attributed solely to architectural changes. Verify that any pretrained checkpoint has not trained on the intended test data; otherwise retrain on the approved split or restrict the claim.
 
-Done when: the learned predictor is compared against simple alternatives both as a forecaster and as part of the tracker.
+Planned metrics:
 
-### M6 — Adaptive identity association
+- **ADE/FDE of the top-ranked candidate:** mean position error over the horizon and error at its final step.
+- **minADE@K and minFDE@K:** best candidate in hindsight, with the same K and sampling budget across comparable models. These are oracle measures, not the application's actual selection; the two minima may select different candidates.
+- **Candidate behavior:** duplicate paths, candidate usage, diversity, and coverage of observed futures.
+- **Scene consistency:** obstacle or non-walkable-region intersections where reliable aligned maps exist. Define how segments between predicted points are checked.
+- **Efficiency:** model latency, parameter count, and full-pipeline runtime on recorded hardware and batch settings.
 
-Tasks:
-- Integrate appearance embeddings and a consistent track appearance history.
-- Implement a fixed motion/appearance matching reference.
-- Define uncertainty explicitly: initially use the tracker covariance; a GRU needs its own justified uncertainty estimate rather than assuming its point prediction supplies one.
-- Design adaptive weights or gates using motion uncertainty, appearance reliability, and time missing.
-- Handle unmatched observations, lost-track lifetime, and rejection of implausible matches.
-- Compare fixed and adaptive association with identical detector outputs and motion settings.
+Use physical-distance or pedestrian-collision claims only when calibration and evaluation definitions support them. A soft obstacle penalty does not guarantee safe or collision-free behavior.
 
-Done when: the method has a clear mathematical description, an implementation, and a controlled evaluation of identity recovery.
+Split by scene or independent sequence before constructing overlapping windows. Keep all related frames and identities within the chosen partition. Select hyperparameters on validation data and reserve test data for the final evaluation. Record units, horizons, data availability, random seeds, checkpoint provenance, and preprocessing versions for every comparison.
 
-### M7 — Final experiments, demonstration, and thesis evidence
+## 8. Phase 1 work and completion criteria
 
-Tasks:
-- Evaluate the selected methods on held-out footage.
-- Use MOT17 and extend to DanceTrack as planned for more varied motion and similar appearances.
-- Test real occlusions and separately report controlled missing-detection experiments. Dropping detections is a proxy, not a full simulation of visual occlusion.
-- Run component comparisons to isolate what each change contributes.
-- Create a demonstration showing IDs, trails, forecasts, and recovery cases.
-- Document limitations, runtime conditions, training details, and reproducible commands.
+Phase 1 ends with a specific, feasible design and evaluation contract. Full training runs and a finished application belong to later phases.
 
-Done when: the results and demonstration support a defensible thesis conclusion, including any conditions where the proposed method fails.
-
-Optional extensions after the main system works: ReID fine-tuning, a small neural match scorer, and a live-camera interface.
-
-## 6. Data and experimental rules
-
-- Begin development with one MOT17 training sequence, such as MOT17-02.
-- Do not treat MOT17 DPM/FRCNN/SDP copies of the same base video as independent scenes. All copies of a base sequence must remain in the same partition.
-- Split by base video/scene for this project; do not randomly mix overlapping trajectory windows or adjacent video frames across partitions.
-- Use training data for fitting weights, validation data for selecting settings, and untouched evaluation data for the final comparison.
-- If ReID crops are used, preserve sequence-scoped person identities and prevent evaluation crops from entering training.
-- Start trajectory learning with ground-truth histories, then test robustness to detector/tracker errors.
-- Preserve or explicitly resample timestamps: a fixed number of frames represents different durations at different FPS.
-- Report image-plane prediction units and forecast horizons consistently.
-- Reuse identical detections when comparing association methods. Evaluate detector changes separately.
-- Record implementation version, detector checkpoint, input resolution, thresholds, tracker settings, random seeds, data split, and runtime hardware.
-- Report local comparisons under our own protocol. Do not imply reproduction of published leaderboard results with different models or data.
-
-## 7. Planned evidence
-
-| Question | Controlled comparison | Evidence |
+| Step | Work | Evidence required to finish |
 | --- | --- | --- |
-| Does detector fine-tuning help? | Original vs fine-tuned detector with the same tracker | Detection precision/recall and AP; downstream HOTA, IDF1, ID switches |
-| Does learned prediction help? | Constant velocity/Kalman vs GRU under a fixed protocol | Average/final displacement error and downstream tracking metrics |
-| Does adaptation help? | Fixed vs adaptive association with identical detections and predictor | HOTA, IDF1, ID switches; recovery examples and results by missing duration |
-| What is the cost? | Same hardware and input settings | Runtime and throughput; separate processing from visualization/export where possible |
+| 1. Record constraints | Capture hardware, storage, environment, and available development time. | A short resource note that limits model and dataset choices. |
+| 2. Inspect candidate data | Review a few sequences and overlay trajectories, estimated/annotated pose, and scene coordinates. | A dataset choice with examples, known limitations, and a split strategy. |
+| 3. Specify one sample | Define every input, output, mask, coordinate transform, and time interval. | One annotated example and a complete tensor/data contract. |
+| 4. Resolve the model design | Select the initial encoder, fusion, decoder, ranking, and loss implementations. | An architecture diagram and concise reasons for each choice; no unresolved output semantics. |
+| 5. Check comparison feasibility | Inspect and minimally run the reference implementation on suitable sample data where possible; identify preprocessing and checkpoint constraints. | A reproducibility note for Y-Net, or a documented reason to select another established predictor. |
+| 6. Freeze the first experiment | Specify the split, baselines, ablations, metrics, units, and compute budget. | A reproducible experiment specification ready for implementation. |
 
-Any custom recovery metric must specify which occlusions count, the allowed recovery window, and how incorrect identity assignments are penalized. It should supplement standard metrics.
+Completion checklist:
 
-## 8. Next work session
+- [x] Main task and direct-path output selected.
+- [x] Four-source candidate architecture documented.
+- [x] Repository overview and Phase 1 plan updated.
+- [ ] Dataset selected after sample inspection.
+- [ ] Coordinates, timing, masks, and missing-observation policy fixed.
+- [ ] T_obs, T_pred, sampling interval, and K fixed for the first experiment.
+- [ ] First model and training objective specified.
+- [ ] Reference feasibility and training-data provenance checked.
+- [ ] Split, metrics, ablations, and hardware recorded.
 
-The immediate next step after saving the plan is environment setup, followed by M1.
+**Immediate next action:** inspect candidate dataset samples for usable pose and aligned trajectories, then define one training example end to end. This resolves the largest dependency before committing to detailed layers or training schedules.
 
-Required setup details still to confirm:
-- Windows with Anaconda, WSL/Linux, or another environment.
-- GPU model and available VRAM.
-- Repository URL if direct repository assistance is wanted.
+After Phase 1, development should proceed from a verified data loader and motion-only predictor to the full model, controlled experiments, perception integration, and a replayable demonstration. Detailed milestones will follow the selected data and design.
 
-First session target:
-- [ ] Plan saved in the repository.
-- [ ] Dedicated environment created and checked.
-- [ ] One input sequence accessible.
-- [ ] First detection run saved.
+## 9. Reading tied to decisions
 
-Next target: add ByteTrack IDs and movement histories. No trajectory-network training is required to reach this baseline.
+- [Y-Net and PECNet: official code and papers](https://github.com/HarshayuGirase/Human-Path-Prediction) — understand the established reference and its data protocol; its goal-based design does not determine our architecture.
+- [Human Scene Transformer](https://human-scene-transformer.github.io/) — related work on using pose information for trajectory forecasting.
+- [Ultralytics pose estimation](https://docs.ultralytics.com/tasks/pose/) — understand keypoint outputs, confidence, and training-label requirements.
+- [Ultralytics tracking](https://docs.ultralytics.com/modes/track/) — understand how existing tracking components provide observation histories.
 
-## 9. Primary references
+## Decision history
 
-- Ultralytics tracking documentation: https://docs.ultralytics.com/modes/track/
-- Ultralytics training documentation: https://docs.ultralytics.com/modes/train/
-- ByteTrack official repository and paper links: https://github.com/FoundationVision/ByteTrack
-- BoT-SORT official repository and paper links: https://github.com/NirAharon/BoT-SORT
-- MOT17 dataset: https://motchallenge.net/data/MOT17/
-- DanceTrack dataset: https://github.com/DanceTrack/DanceTrack
-- TrackEval: https://github.com/JonathonLuiten/TrackEval
-- Torchreid fine-tuning documentation: https://github.com/KaiyangZhou/deep-person-reid/blob/master/docs/user_guide.rst
-
+Version 0.3 replaces the earlier identity-association scope and the provisional endpoint-first design with direct prediction of complete paths. It restores all four input sources to the intended full model and keeps Phase 1 focused on design and feasibility. Earlier plans remain available through version history.
